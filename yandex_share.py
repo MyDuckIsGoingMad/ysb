@@ -1,77 +1,76 @@
 from flask import Flask, request
 import requests
-from html.parser import HTMLParser
+from page_parser import PageParser
 
 from settings import APP_TOKEN, WEB_API_TOKEN
 
 app = Flask(__name__)
 
-class FindImage(HTMLParser):
-    def __init__(self):
-        HTMLParser.__init__(self)
-        self.data = None
-
-    def handle_starttag(self, tag, attributes):
-        if tag != 'img':
-            return
-        flag = False
-        url = None
-        for i in attributes:
-            if i[0] == 'class':
-                if 'js-view-original-resource' in i[1]:
-                    flag = True
-            if i[0] == 'src':
-                url = i[1]
-        if flag:
-            self.data = url
-
-
-@app.route("/", methods=['GET', 'POST'])
+@app.route('/', methods=['GET', 'POST'])
 def hello():
-    return "Hello There!"
+    return 'Hello There!'
 
-@app.route("/event-endpoint", methods=['GET', 'POST'])
+
+def handle_url_verification(data):
+    return data.get('challenge')
+
+def handle_link_shared(event):
+    unfurls = {}
+    for link in event.get('links'):
+        url = link.get('url')
+        origin = requests.get(url)
+        p = PageParser()
+        p.feed(origin.text)
+        p.close()
+
+        if p.content_type == PageParser.IMAGE:
+            unfurls[url] = {
+                'text': 'image',
+                'image_url': p.content
+            }
+    response = requests.post('https://slack.com/api/chat.unfurl',
+                             json={
+                                 'token': WEB_API_TOKEN,
+                                 'channel': event.get('channel'),
+                                 'ts': event.get('message_ts'),
+                                 'unfurls': unfurls
+                             },
+                             headers={
+                                 'Content-type': 'application/json;charset=utf-8',
+                                 'Authorization': 'Bearer %s' % WEB_API_TOKEN
+                             })
+
+    print('unfurl %s' % response.text)
+    return('Done')
+
+
+@app.route('/event-endpoint', methods=['POST'])
 def event_endpoint():
     payload = request.get_json()
     p_type = payload.get('type', None)
-    auth_valid = payload.get('token') == APP_TOKEN
-    if p_type == 'url_verification':
-        return payload.get('challenge')
-    elif p_type == 'event_callback':
-        if not auth_valid:
-            return 'Go out!'
-        event = payload.get('event', None)
-        e_type = event.get('type', None)
-        if e_type == 'link_shared':
-            url = event.get('links')[0].get('url')
-            origin = requests.get(url)
-            p = FindImage()
-            p.feed(origin.text)
-            p.close()
-            img = p.data
-            body = {
-                'token': WEB_API_TOKEN,
-                'channel': event.get('channel'),
-                'ts': event.get('message_ts'),
-                'unfurls': {
-                    url: {
-                        'title': 'Test Bot',
-                        'text': 'image found',
-                        'image_url': 'https:%s' % img
-                    }
-                }
-            }
-            r = requests.post('https://slack.com/api/chat.unfurl',
-                              json=body,
-                              headers={
-                                  'Content-type': 'application/json;charset=utf-8',
-                                  'Authorization': 'Bearer %s' % WEB_API_TOKEN
-                              })
-            print('unfurl %s' % r.text)
-            return('Done')
 
-    print(payload)
-    return ('Knock knock')
+    # Special bot verification event
+    if p_type == 'url_verification':
+        return handle_url_verification(payload)
+
+    # We handle only one type of message
+    if p_type != 'event_callback':
+        return None
+
+    # reject message with wrong token
+    if payload.get('token') != APP_TOKEN:
+        return None
+
+    event = payload.get('event', None)
+    if not event:
+        return None
+    event_type = event.get('type', None)
+
+    if event_type == 'link_shared':
+        return handle_link_shared(event)
+
+    return None
+
 
 if __name__ == '__main__':
         app.run(debug=True)
